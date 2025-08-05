@@ -8,15 +8,18 @@ import base64
 from datetime import datetime
 from dotenv import load_dotenv
 import os
+import fitz  # PyMuPDF
+import docx
+from pathlib import Path
+from email import policy
+from email.parser import BytesParser
 
 # --- LOAD API KEY FROM ENV ---
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=api_key)
 
-# --- TEXT DATASET LOADING ---
-with open('cat-facts.txt', 'r', encoding='utf-8') as file:
-    TEXT_DATASET = [line.strip() for line in file if line.strip()]
+# --- TEXT VECTOR DB ---
 TEXT_VECTOR_DB = []
 
 # --- IMAGE DESCRIPTIONS DB ---
@@ -37,20 +40,90 @@ async def get_embedding(text: str):
     )
     return response.data[0].embedding
 
+# --- PARSE PDF ---
+def parse_pdf(path):
+    doc = fitz.open(path)
+    chunks = []
+    for page_num, page in enumerate(doc, 1):
+        text = page.get_text().strip()
+        if text:
+            chunks.append({
+                "chunk": text,
+                "document_name": path.name,
+                "page_number": page_num
+            })
+    return chunks
+
+# --- PARSE DOCX ---
+def parse_docx(path):
+    doc = docx.Document(path)
+    chunks = []
+    for i, para in enumerate(doc.paragraphs):
+        text = para.text.strip()
+        if text:
+            chunks.append({
+                "chunk": text,
+                "document_name": path.name,
+                "section_title": f"Paragraph {i + 1}"
+            })
+    return chunks
+
+# --- PARSE TXT ---
+def parse_txt(path):
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    chunks = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if line:
+            chunks.append({
+                "chunk": line,
+                "document_name": path.name,
+                "section_title": f"Line {i + 1}"
+            })
+    return chunks
+
+# --- PARSE EML ---
+def parse_eml(path):
+    with open(path, "rb") as f:
+        msg = BytesParser(policy=policy.default).parse(f)
+    body = msg.get_body(preferencelist=('plain'))
+    if body:
+        content = body.get_content().strip()
+        return [{
+            "chunk": content,
+            "document_name": path.name,
+            "section_title": "Email Body"
+        }]
+    return []
+
 # --- BUILD TEXT VECTOR DB ---
 async def build_text_vector_db():
-    print("Building text vector DB...")
-    tasks = [get_embedding(chunk) for chunk in TEXT_DATASET]
+    print("📄 Building text vector DB from documents/ ...")
+    all_chunks = []
+
+    docs_path = Path("documents")
+    for file in docs_path.glob("*"):
+        if file.suffix.lower() == ".pdf":
+            all_chunks.extend(parse_pdf(file))
+        elif file.suffix.lower() == ".docx":
+            all_chunks.extend(parse_docx(file))
+        elif file.suffix.lower() == ".txt":
+            all_chunks.extend(parse_txt(file))
+        elif file.suffix.lower() == ".eml":
+            all_chunks.extend(parse_eml(file))
+        else:
+            print(f"⚠️ Skipping unsupported file: {file.name}")
+
+    print(f"Total chunks found: {len(all_chunks)}")
+    tasks = [get_embedding(chunk["chunk"]) for chunk in all_chunks]
     embeddings = await asyncio.gather(*tasks)
 
-    for i, (chunk, emb) in enumerate(zip(TEXT_DATASET, embeddings)):
-        TEXT_VECTOR_DB.append({
-            "chunk": chunk,
-            "embedding": emb,
-            "source_file": "cat-facts.txt",
-            "line_number": i + 1
-        })
-    print("Text vector DB ready.")
+    for chunk, emb in zip(all_chunks, embeddings):
+        chunk["embedding"] = emb
+        TEXT_VECTOR_DB.append(chunk)
+
+    print("✅ Text vector DB ready.")
 
 # --- IMAGE TO TEXT VIA GPT-4o ---
 async def describe_image_base64(b64: str, mime: str):
@@ -80,17 +153,8 @@ def load_system_prompt(context: str) -> str:
 async def retrieve_combined_context(query: str, top_n=3):
     query_emb = await get_embedding(query)
 
-    # From text
-    text_scores = []
-    for item in TEXT_VECTOR_DB:
-        score = cosine_similarity(query_emb, item["embedding"])
-        text_scores.append((item, score))
-
-    # From image descriptions
-    image_scores = []
-    for item in IMAGE_VECTOR_DB:
-        score = cosine_similarity(query_emb, item["embedding"])
-        image_scores.append((item, score))
+    text_scores = [(item, cosine_similarity(query_emb, item["embedding"])) for item in TEXT_VECTOR_DB]
+    image_scores = [(item, cosine_similarity(query_emb, item["embedding"])) for item in IMAGE_VECTOR_DB]
 
     text_scores.sort(key=lambda x: x[1], reverse=True)
     image_scores.sort(key=lambda x: x[1], reverse=True)
@@ -108,14 +172,20 @@ async def ask(query: str):
     context_parts = []
     citations = []
 
-    for item, score in results:
+    for item, _ in results:
         chunk = item["chunk"]
-        if "source_file" in item:
-            citation = f"(source: {item['source_file']}, line {item['line_number']})"
+        if "document_name" in item:
+            if "page_number" in item:
+                citation = f"(source: {item['document_name']}, page {item['page_number']})"
+            elif "section_title" in item:
+                citation = f"(source: {item['document_name']}, section {item['section_title']})"
+            else:
+                citation = f"(source: {item['document_name']})"
         elif "image_name" in item:
             citation = f"(image: {item['image_name']}, uploaded at {item['uploaded_at']})"
         else:
             citation = "(source: unknown)"
+
         context_parts.append(f"- {chunk} {citation}")
         citations.append(citation)
 
@@ -181,7 +251,7 @@ async def main():
     await build_text_vector_db()
     app = make_app()
     app.listen(8888)
-    print("Server running at http://localhost:8888")
+    print("🚀 Server running at http://localhost:8888")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
