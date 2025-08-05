@@ -13,6 +13,7 @@ import docx
 from pathlib import Path
 from email import policy
 from email.parser import BytesParser
+import re
 
 # --- LOAD API KEY FROM ENV ---
 load_dotenv()
@@ -41,59 +42,134 @@ async def get_embedding(text: str):
     return response.data[0].embedding
 
 # --- PARSE PDF ---
+import re
+
 def parse_pdf(path):
     doc = fitz.open(path)
     chunks = []
+
     for page_num, page in enumerate(doc, 1):
         text = page.get_text().strip()
-        if text:
-            chunks.append({
-                "chunk": text,
-                "document_name": path.name,
-                "page_number": page_num
-            })
+        if not text:
+            continue
+
+        # Split by "Clause X:" or "Section X:"
+        sections = re.split(r"(Clause\s+\d+:|Section\s+\d+:)", text)
+        
+        # Recombine titles + content
+        i = 0
+        while i < len(sections) - 1:
+            if re.match(r"(Clause\s+\d+:|Section\s+\d+:)", sections[i]):
+                section_title = sections[i].strip()
+                content = sections[i + 1].strip()
+                if content:
+                    chunks.append({
+                        "chunk": f"{section_title} {content}",
+                        "document_name": path.name,
+                        "page_number": page_num,
+                        "section_title": section_title
+                    })
+                i += 2
+            else:
+                i += 1
+
     return chunks
 
 # --- PARSE DOCX ---
 def parse_docx(path):
     doc = docx.Document(path)
     chunks = []
-    for i, para in enumerate(doc.paragraphs):
+
+    current_section = "Unknown Section"
+    current_text = []
+
+    for para in doc.paragraphs:
         text = para.text.strip()
-        if text:
-            chunks.append({
-                "chunk": text,
-                "document_name": path.name,
-                "section_title": f"Paragraph {i + 1}"
-            })
+        if not text:
+            continue
+
+        # Detect section headers
+        if re.match(r"(Section\s+\d+:?|Clause\s+\d+:?|Confidentiality|Governing Law|Term|Obligations)", text, re.IGNORECASE):
+            # If we had previous section content, store it
+            if current_text:
+                chunks.append({
+                    "chunk": "\n".join(current_text),
+                    "document_name": path.name,
+                    "section_title": current_section
+                })
+                current_text = []
+
+            current_section = text  # New heading
+        else:
+            current_text.append(text)
+
+    # Append last section
+    if current_text:
+        chunks.append({
+            "chunk": "\n".join(current_text),
+            "document_name": path.name,
+            "section_title": current_section
+        })
+
     return chunks
 
 # --- PARSE TXT ---
+import re
+
 def parse_txt(path):
     with open(path, "r", encoding="utf-8") as f:
         lines = f.readlines()
+
     chunks = []
-    for i, line in enumerate(lines):
+    current_section = "Unknown Section"
+    current_text = []
+
+    for line in lines:
         line = line.strip()
-        if line:
-            chunks.append({
-                "chunk": line,
-                "document_name": path.name,
-                "section_title": f"Line {i + 1}"
-            })
+        if not line:
+            continue
+
+        # Detect section headings like: Section 1, Clause 3, Confidentiality
+        if re.match(r"(Section\s+\d+:?|Clause\s+\d+:?|Confidentiality|Governing Law|Term|Obligations)", line, re.IGNORECASE):
+            if current_text:
+                chunks.append({
+                    "chunk": "\n".join(current_text),
+                    "document_name": path.name,
+                    "section_title": current_section
+                })
+                current_text = []
+
+            current_section = line
+        else:
+            current_text.append(line)
+
+    if current_text:
+        chunks.append({
+            "chunk": "\n".join(current_text),
+            "document_name": path.name,
+            "section_title": current_section
+        })
+
     return chunks
 
 # --- PARSE EML ---
 def parse_eml(path):
     with open(path, "rb") as f:
         msg = BytesParser(policy=policy.default).parse(f)
+
+    email_from = msg["From"]
+    email_to = msg["To"]
+    subject = msg["Subject"]
     body = msg.get_body(preferencelist=('plain'))
+
     if body:
         content = body.get_content().strip()
         return [{
             "chunk": content,
             "document_name": path.name,
-            "section_title": "Email Body"
+            "section_title": f"Subject: {subject or 'No Subject'}",
+            "from": email_from,
+            "to": email_to
         }]
     return []
 
