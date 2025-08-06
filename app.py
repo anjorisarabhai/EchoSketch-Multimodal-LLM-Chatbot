@@ -42,7 +42,7 @@ async def get_embedding(text: str):
     return response.data[0].embedding
 
 # --- PARSE PDF ---
-import re
+
 
 def parse_pdf(path):
     doc = fitz.open(path)
@@ -114,7 +114,6 @@ def parse_docx(path):
     return chunks
 
 # --- PARSE TXT ---
-import re
 
 def parse_txt(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -316,11 +315,52 @@ class UploadImageHandler(tornado.web.RequestHandler):
             self.set_status(500)
             self.write({"error": str(e)})
 
+class SlotExtractionHandler(tornado.web.RequestHandler):
+    async def post(self):
+        try:
+            data = json.loads(self.request.body)
+            query = data.get("query", "").strip()
+            if not query:
+                self.set_status(400)
+                return self.write({"error": "Missing 'query' field"})
+
+            prompt = f"""
+Extract structured information from the query below.
+
+Query: "{query}"
+
+Return JSON with the following fields: age, gender, procedure, location, policy_age (in months).
+"""
+            response = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0
+            )
+
+            content = response.choices[0].message.content.strip()
+
+            # Try parsing to JSON
+            try:
+                structured_data = json.loads(content)
+                self.write({"slots": structured_data})
+            except json.JSONDecodeError:
+                self.write({
+                    "slots": {},
+                    "raw_response": content,
+                    "warning": "Response could not be parsed as JSON. Returned raw text instead."
+                })
+
+        except Exception as e:
+            self.set_status(500)
+            self.write({"error": str(e)})
+
+
 # --- SETUP ---
 def make_app():
     return tornado.web.Application([
         (r"/ask", AskHandler),
         (r"/upload_image", UploadImageHandler),
+        (r"/extract_slots", SlotExtractionHandler),
     ])
 
 async def main():
