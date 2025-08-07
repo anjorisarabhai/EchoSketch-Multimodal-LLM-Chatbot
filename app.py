@@ -341,8 +341,10 @@ Return JSON with the following fields: age, gender, procedure, location, policy_
 
             # Try parsing to JSON
             try:
-                structured_data = json.loads(content)
-                self.write({"slots": structured_data})
+                extracted_slots = json.loads(content)
+                # Apply the decision-making logic
+                decisions = apply_clause_mapping(extracted_slots)
+                self.write({"slots": extracted_slots, "decisions": decisions})
             except json.JSONDecodeError:
                 self.write({
                     "slots": {},
@@ -353,6 +355,45 @@ Return JSON with the following fields: age, gender, procedure, location, policy_
         except Exception as e:
             self.set_status(500)
             self.write({"error": str(e)})
+
+# --- Decision Logic with Clause Mapping ---
+def apply_clause_mapping(extracted_slots):
+    CLAUSES = [
+        {
+            "clause": "Knee surgeries are not covered if the policy is less than 6 months old.",
+            "condition": "policy_age",
+            "comparison": lambda x: x < 6,
+            "decision": "rejected",
+            "amount": 0,
+            "justification": "Policy age is less than 6 months."
+        },
+        {
+            "clause": "Surgery costs are covered if the policy is more than 12 months old.",
+            "condition": "policy_age",
+            "comparison": lambda x: x > 12,
+            "decision": "approved",
+            "amount": 5000,
+            "justification": "Policy age is more than 12 months."
+        },
+    ]
+
+    decisions = []
+    
+    # Iterate over clauses and check conditions
+    for clause in CLAUSES:
+        policy_age = extracted_slots.get("policy_age", None)
+
+        if policy_age is not None and clause["comparison"](policy_age):
+            decision = {
+                "clause": clause["clause"],
+                "decision": clause["decision"],
+                "amount": clause["amount"],
+                "justification": clause["justification"]
+            }
+            decisions.append(decision)
+    
+    return decisions
+
 
 
 # --- SETUP ---

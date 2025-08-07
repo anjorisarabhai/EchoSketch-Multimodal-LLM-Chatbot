@@ -5,6 +5,7 @@ import time
 BACKEND_URL = "http://localhost:8888"
 
 # ---------- Slot Extraction ----------
+# ---------- Slot Extraction ---------- 
 def extract_slots(query):
     if not query.strip():
         return "Please enter a query."
@@ -13,8 +14,19 @@ def extract_slots(query):
         res = requests.post(f"{BACKEND_URL}/extract_slots", json={"query": query})
         res.raise_for_status()
         data = res.json()
+        
         if "slots" in data and data["slots"]:
-            return f"**Extracted Slots:**\n\n```json\n{data['slots']}\n```"
+            slots_output = f"**Extracted Slots:**\n\n```json\n{data['slots']}\n```"
+            
+            if "decisions" in data:
+                decision_output = "\n\n**Decision Results:**\n"
+                for decision in data["decisions"]:
+                    decision_output += f"- **Decision**: {decision['decision']} (Justification: {decision['justification']})\n"
+                    if decision["amount"] > 0:
+                        decision_output += f"  Amount: ${decision['amount']}\n"
+                slots_output += decision_output
+
+            return slots_output
         elif "raw_response" in data:
             return f"Raw response:\n\n{data['raw_response']}"
         else:
@@ -79,7 +91,7 @@ def ask_question(question, history):
     yield history, "", gr.update(visible=False)
 
 # ---------- UI ----------
-with gr.Blocks(css="""
+with gr.Blocks(css=""" 
     .gr-chat-message.user {
         text-align: right;
         background-color: #d4f4ff;
